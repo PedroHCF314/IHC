@@ -2,18 +2,27 @@ import re
 import os
 import sys
 import telebot
+import time
 from telebot import types
 import configparser
 import urllib.request, json
 from bs4 import BeautifulSoup
 import requests
 
+from chatterbot import ChatBot
+
+
 
 # Connectando ao API  Telegram
+
 curPath = os.path.dirname(os.path.realpath(sys.argv[0]));
 config = configparser.ConfigParser()
 config.read_file(open(curPath+'\config_hal.ini'))
 bot = telebot.TeleBot(token=config['DEFAULT']['token'])
+
+
+
+    
 
 #uriEncoder
 def uriEncode(t):
@@ -25,16 +34,22 @@ def getJSON(req):
     with urllib.request.urlopen(req) as url:
         return json.loads(url.read().decode())
 
+def castHeaderCorrection(s):
+    s = re.sub(r'[\ \n]{2,}', '',s).replace('\n','')
+    return s.replace("Director:","<b>Director: </b>").replace("Stars:","\n\n<b>Stars: </b>").replace("|","").replace(",",", ").replace("Directors:","<b>Directors: </b>")
+    
 #youtubeLinkFormatter
 def youtubeLink(l):
     return l.split('?')[0].replace('embed/','watch?v=').replace('//www.','')
 
-#Global Vars.               
+#Global Vars
+sResultsList = []
 randomMoviesRatingScores = [9.5,9,8.5,8,7.5,7,6.5,6]
 randomMoviesGenresList = {'action','adventure','animation','biography','comedy','comedy','documentary','drama','family','fantasy','film_noir','history','horror','music','musical','mystery','romance','sci_fi','short', 'sport','thriller','war','western'}
 commonPhrases = {'noMovieFound':'No movies found, please try again!',
                  'mayYoulike':'Maybe you\'ll like this one',
-                 'formatError':'Please use the following format:'}
+                 'formatError':'Please use the following format:',
+                 'search_result_desc':'Here\'s what you looking for:'}
 botStartText = """
 Welcome to the Movies Search Bot!
 
@@ -67,6 +82,11 @@ You can control me by sending these commands:
 
 <b>Suggestions by IMDB Score:</b>
 /sbr <b>IDMB Score (0-10)</b> - Returns a suggestion based on the score\n(Ex: /sbr 6 - will return a movie rated in 6 or above)
+
+You can also search for specific movies:
+
+<b>Search:</b>
+To do so just type <b>@MoviesSearch_bot</b> <i>your movie name</i> and a list with 10 results will appear
 """
 
 #getRandomMovieBy
@@ -185,7 +205,7 @@ def suggestGenre_cmd(message):
     markup = types.ReplyKeyboardMarkup(row_width=4)
     for x in randomMoviesGenresList:
         markup.add(types.KeyboardButton('/sbg '+x.replace('_','-')))    
-    bot.send_message(message.chat.id, "Tell me what genre based suggestions do you want:", reply_markup=markup)
+    bot.send_message(message.chat.id, "Type the command /sbc followed by the genre based suggestions do you want:", reply_markup=markup)
 
 @bot.message_handler(commands=['sbg'])
 def suggestGenre_select(message):
@@ -209,7 +229,7 @@ def suggestGenre_select(message):
 @bot.message_handler(commands=['suggestByDirector'])
 def suggestDirector_cmd(message):
     markup = types.ForceReply(selective=False)
-    bot.send_message(chat_id=message.chat.id, parse_mode='HTML',text="Tell me what director you've in mind:\nEx: <b>/sbd Stanley Kubrick</b>", reply_markup=markup)
+    bot.send_message(chat_id=message.chat.id, parse_mode='HTML',text="Type the command /sbd followed by the director that you've in mind:\nEx: <b>/sbd Stanley Kubrick</b>", reply_markup=markup)
 
 @bot.message_handler(commands=['sbd'])
 def suggestDirector_select(message):
@@ -227,8 +247,9 @@ def suggestDirector_select(message):
 #RECOMENDAÇÕES - CAST
 @bot.message_handler(commands=['suggestByCast'])
 def suggestCast_cmd(message):
+    print(message)
     markup = types.ForceReply(selective=False)
-    bot.send_message(chat_id=message.chat.id, parse_mode='HTML', text="Tell me what actor/actress you've in mind:\nEx: <b>/sbc Marlon Brando</b>", reply_markup=markup)
+    bot.send_message(chat_id=message.chat.id, parse_mode='HTML', text="Type the command /sbc followed by the actor/actress you've in mind:\nEx: <b>/sbc Marlon Brando</b>", reply_markup=markup)
 
 @bot.message_handler(commands=['sbc'])
 def suggestCast_select(message):
@@ -294,6 +315,117 @@ def inlineCallbackHandler(call):
         suggestAnything_cmd(call.message)
     elif(re.match("/sbr", call.data)):
         suggestRating_select(call.message,re.split("/sbr ", call.data)[1])
-        
+
+
+#PARTE II - BUSCA DE FILMES
+
+#BUSCA TRAILERS NO YOUTUBE ATRAVES DO NOME DO FILME
+def getYoutubeTrailer(movie):
+    query = urllib.request.quote(movie + " movie trailer")
+    url = "https://www.youtube.com/results?search_query=" + query
+    response = urllib.request.urlopen(url)
+    html = response.read()
+    soup = BeautifulSoup(html,'html.parser')
+    return 'https://www.youtube.com' + soup.find(attrs={'class':'yt-uix-tile-link'})['href']
+
+#FAZ BUSCA NO IMDB POR FILMES (EXIBE ATÉ 10 RESULTADOS)
+def movieSearch(search=''):
+    global sResultsList
+    del sResultsList
+    sResultsList = [] #GLOBAL RESULTS LIST
+    results_list = [] #LOCAL RESULTS LIST
+    i = 0
+    url = "http://www.imdb.com/search/title?adult=include&title_type=feature,tv_movie,documentary,short&title="+search
+    sopa = BeautifulSoup(urllib.request.urlopen(url).read().decode('utf-8'),"lxml").find('div',{'class':'lister-list'})
+
+    try:
+        html = sopa.findAll('div',{'class':'lister-item'})    
+        for x in html:
+            try:
+                title = x.find('h3',{'class':'lister-item-header'}).find('a').get_text()
+            except:
+                title = ""
+            try:
+                url = "http://imdb.com"+x.find('h3',{'class':'lister-item-header'}).find('a')['href']
+            except:
+                url = "http://imdb.com"
+            try:
+                year = x.find('h3',{'class':'lister-item-header'}).find('span',{'class':'lister-item-year'}).get_text()
+            except:
+                year = ""    
+            try:
+                rating = x.find('div',{'class':'ratings-bar'}).find('div',{'class':'ratings-imdb-rating'}).find('strong').get_text()
+            except:
+                rating = "?"
+            try:
+                genre = x.find('p',{'class':'text-muted'}).find('span',{'class':'genre'}).get_text()
+            except:
+                genre = ""
+            try:
+                runtime = x.find('p',{'class':'text-muted'}).find('span',{'class':'runtime'}).get_text()
+            except:
+                runtime = ""
+            try:
+                summary = x.findAll('p',{'class':'text-muted'})[1].get_text()
+            except:
+                summary = ""    
+            try:
+                castAndDirectors = x.findAll('p')[2].get_text()
+            except:
+                castAndDirectors = ""
+            try:
+                poster = x.find('div',{'class':'lister-item-image'}).find('a').find('img')['loadlate']
+            except:
+                poster = ""
+            sResultsList.append({'title': title, 'runtime' : runtime,'poster': poster, 'castAndDirectors': castAndDirectors, 'summary': summary,'year':year,'genre':genre,'rating':rating, 'imdbUrl':url}) 
+            results_list.append(types.InlineQueryResultArticle(str(i), title, types.InputTextMessageContent(search), None, url, True,  summary, poster,40, 60))
+            if i == 9:
+                break;
+            i= i+1
+    except:
+        results_list.append(types.InlineQueryResultArticle("666", "Could not find results", types.InputTextMessageContent('Check if the title you searched is correct!'), None, url, True,  "", "http://ia.media-imdb.com/images/G/01/imdb/images/nopicture/large/film-184890147._CB522736516_.png",40, 40))
+    i = 0    
+    return results_list
+
+#INICIA BUSCA SEMPRE QUE O USUARIO CHAMAR O BOT "@MoviesSearch_bot godfather"
+@bot.inline_handler(lambda query: query.query)
+def search_cmd(message):
+    print(message)
+    resultsList = movieSearch(message.query)
+    while resultsList == None:
+        time.sleep(20)
+    bot.answer_inline_query(message.id, results=resultsList, cache_time=1)
+    
+@bot.chosen_inline_handler(func=lambda chosen_inline_result: True)
+def inline_chosen(res):
+    global sResultsList
+    id = int(res.result_id)
+    print(sResultsList[int(res.result_id)])
+    markup = types.ReplyKeyboardRemove(selective=False)
+    msgBody = commonPhrases['search_result_desc']+"\n\n<b>"+sResultsList[id]['title']+" "+sResultsList[id]['year']+"</b> | "+sResultsList[id]['runtime']+"\n\U00002B50 <b>"+sResultsList[id]['rating']+"</b>/10 on <a style=\"display:none\" href=\""+sResultsList[id]['imdbUrl']+"\">IMDB</a>\n\n<b>Genre: </b>"+sResultsList[id]['genre']+"\n\n"+castHeaderCorrection(sResultsList[id]['castAndDirectors'])+"\n\n<b>Summary:</b> "+sResultsList[id]['summary']
+    bot.send_message(chat_id=res.from_user.id,parse_mode='HTML',text=msgBody,disable_web_page_preview=True,reply_markup=markup)
+    bot.send_photo(chat_id=res.from_user.id, caption="\""+sResultsList[id]['title']+"\" poster", photo=sResultsList[id]['poster'])
+    bot.send_message(chat_id=res.from_user.id,parse_mode='HTML',text="<b>Trailer:</b>\n@vid "+getYoutubeTrailer(sResultsList[id]['title']))
+
+
+#CHATTER
+chatbot = ChatBot(
+    'Hal 9000',
+    trainer='chatterbot.trainers.ChatterBotCorpusTrainer'
+)
+
+#chatbot.storage.drop()
+
+chatbot.train("chatterbot.corpus.english.conversations")
+chatbot.train("chatterbot.corpus.english.humor")
+chatbot.train("chatterbot.corpus.english.movies")
+chatbot.train("chatterbot.corpus.english.movies_suggestions")
+
+@bot.message_handler(func=lambda m: True)
+def get_conversation(msg):
+    res = chatbot.get_response(msg.text)
+    bot.send_message(chat_id=msg.chat.id,parse_mode='HTML',text=res)
+
+   
 #Roda Bot
 bot.polling()
